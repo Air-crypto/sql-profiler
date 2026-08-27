@@ -25,17 +25,24 @@ test("server-renders the SQL optimization lab", async () => {
   assert.doesNotMatch(html, /codex-preview|Your site is taking shape/i);
 });
 
-test("ships the expanded workload and removes starter preview code", async () => {
-  const [page, lab, layout] = await Promise.all([
+test("ships a generalized workload optimizer and removes starter preview code", async () => {
+  const [page, lab, optimizer, layout] = await Promise.all([
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/lab.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/generalized-optimizer.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/layout.tsx", import.meta.url), "utf8"),
   ]);
 
   assert.match(page, /Join overlap/);
-  assert.match(page, /JOIN_HOTSPOTS/);
-  assert.match(lab, /order_customer_facts/);
-  assert.match(lab, /supply-chain-revenue/);
+  assert.match(page, /Modeled runs \/ week/);
+  assert.match(page, /Parallel plan/);
+  assert.match(page, /deriveJoinHotspots/);
+  assert.match(optimizer, /parseQueryModel/);
+  assert.match(optimizer, /recordWorkload/);
+  assert.match(optimizer, /parallelGroup/);
+  assert.match(optimizer, /CREATE MATERIALIZED VIEW/);
+  assert.doesNotMatch(optimizer, /EXAMPLES\.find|normalized\(example\.sql\)/);
+  assert.doesNotMatch(lab, /order_customer_facts|JOIN_HOTSPOTS/);
   assert.match(layout, /Loopbase — SQL Optimization Lab/);
   await assert.rejects(access(new URL("../app/_sites-preview", import.meta.url)));
 });

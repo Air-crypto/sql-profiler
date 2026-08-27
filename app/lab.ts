@@ -31,6 +31,8 @@ export type PlanStep = {
   rows: number;
   cost: number;
   tone: "scan" | "filter" | "join" | "compute";
+  parallelGroup?: number;
+  workers?: number;
 };
 
 export type QueryAnalysis = {
@@ -220,22 +222,6 @@ function buildTables(): LabTable[] {
     };
   });
 
-  const customerById = new Map(customers.map((customer) => [Number(customer.id), customer]));
-  const orderCustomerFacts: DataRow[] = orders.map((order) => {
-    const customer = customerById.get(Number(order.customer_id))!;
-    return {
-      order_id: order.id,
-      customer_id: order.customer_id,
-      customer_name: customer.name,
-      region: customer.region,
-      segment: customer.segment,
-      created_at: order.created_at,
-      status: order.status,
-      total_amount: order.total_amount,
-      channel: order.channel,
-    };
-  });
-
   return [
     {
       name: "customers",
@@ -402,170 +388,10 @@ function buildTables(): LabTable[] {
       ],
       data: supportTickets,
     },
-    {
-      name: "order_customer_facts",
-      label: "Materialized order + customer join",
-      tone: "coral",
-      columns: [
-        { name: "order_id", type: "integer", key: "PK" },
-        { name: "customer_id", type: "integer", key: "FK" },
-        { name: "customer_name", type: "text" },
-        { name: "region", type: "text" },
-        { name: "segment", type: "text" },
-        { name: "created_at", type: "date" },
-        { name: "status", type: "text" },
-        { name: "total_amount", type: "decimal" },
-        { name: "channel", type: "text" },
-      ],
-      data: orderCustomerFacts,
-    },
   ];
 }
 
 export const LAB_TABLES = buildTables();
-
-export const EXAMPLES = [
-  {
-    id: "materialized-customer-orders",
-    label: "Hot join → materialized fact",
-    sql: `SELECT c.region,
-       c.segment,
-       COUNT(*) AS order_count,
-       SUM(o.total_amount) AS revenue,
-       AVG(o.total_amount) AS avg_order_value
-FROM customers c
-JOIN orders o ON c.id = o.customer_id
-WHERE o.created_at >= '2025-01-01'
-  AND o.created_at < '2026-01-01'
-  AND o.status IN ('paid', 'shipped')
-GROUP BY c.region, c.segment
-ORDER BY revenue DESC;`,
-    rewrite: `SELECT region,
-       segment,
-       COUNT(*) AS order_count,
-       SUM(total_amount) AS revenue,
-       AVG(total_amount) AS avg_order_value
-FROM order_customer_facts
-WHERE created_at >= '2025-01-01'
-  AND created_at < '2026-01-01'
-  AND status IN ('paid', 'shipped')
-GROUP BY region, segment
-ORDER BY revenue DESC;`,
-    rewriteLabel: "Reuse the materialized order + customer fact",
-  },
-  {
-    id: "supply-chain-revenue",
-    label: "8-table supply-chain revenue",
-    sql: `SELECT c.region AS customer_region,
-       pc.department,
-       s.name AS supplier,
-       w.name AS warehouse,
-       COUNT(*) AS joined_rows,
-       SUM(oi.quantity * oi.unit_price) AS gross_revenue,
-       SUM(sh.shipping_cost) AS shipping_cost
-FROM customers c
-JOIN orders o ON c.id = o.customer_id
-JOIN order_items oi ON o.id = oi.order_id
-JOIN products p ON p.id = oi.product_id
-JOIN product_categories pc ON pc.id = p.category_id
-JOIN suppliers s ON s.id = p.supplier_id
-JOIN shipments sh ON sh.order_id = o.id
-JOIN warehouses w ON w.id = sh.warehouse_id
-WHERE o.created_at >= '2025-01-01'
-  AND o.status IN ('paid', 'shipped')
-GROUP BY c.region, pc.department, s.name, w.name
-ORDER BY gross_revenue DESC;`,
-    rewrite: null,
-    rewriteLabel: null,
-  },
-  {
-    id: "customer-360-fanout",
-    label: "Customer 360 join fan-out",
-    sql: `SELECT c.id,
-       c.name,
-       cp.loyalty_tier,
-       COUNT(*) AS joined_rows,
-       SUM(o.total_amount) AS order_value,
-       SUM(pay.amount) AS captured_value
-FROM customers c
-JOIN customer_profiles cp ON cp.customer_id = c.id
-JOIN orders o ON o.customer_id = c.id
-JOIN payments pay ON pay.order_id = o.id
-JOIN support_tickets st ON st.customer_id = c.id
-WHERE pay.state = 'captured'
-  AND st.resolved = false
-GROUP BY c.id, c.name, cp.loyalty_tier
-ORDER BY captured_value DESC;`,
-    rewrite: null,
-    rewriteLabel: null,
-  },
-  {
-    id: "inventory-network",
-    label: "5-table inventory risk",
-    sql: `SELECT w.region AS warehouse_region,
-       pc.department,
-       s.name AS supplier,
-       COUNT(*) AS inventory_rows,
-       SUM(i.on_hand) AS units,
-       SUM(i.on_hand * p.unit_price) AS inventory_value
-FROM inventory i
-JOIN warehouses w ON w.id = i.warehouse_id
-JOIN products p ON p.id = i.product_id
-JOIN product_categories pc ON pc.id = p.category_id
-JOIN suppliers s ON s.id = p.supplier_id
-WHERE i.on_hand < i.reorder_point
-GROUP BY w.region, pc.department, s.name
-ORDER BY inventory_value DESC;`,
-    rewrite: null,
-    rewriteLabel: null,
-  },
-  {
-    id: "date-report",
-    label: "Non-sargable date report",
-    sql: `SELECT *
-FROM customers c
-JOIN orders o ON c.id = o.customer_id
-WHERE YEAR(o.created_at) = 2025
-ORDER BY o.total_amount DESC;`,
-    rewrite: `SELECT *
-FROM customers c
-JOIN orders o ON c.id = o.customer_id
-WHERE o.created_at >= '2025-01-01'
-  AND o.created_at < '2026-01-01'
-ORDER BY o.total_amount DESC;`,
-    rewriteLabel: "Use a bounded date range",
-  },
-  {
-    id: "subquery-region",
-    label: "Repeated membership subquery",
-    sql: `SELECT o.customer_id,
-       COUNT(*) AS order_count,
-       SUM(o.total_amount) AS revenue
-FROM orders o
-WHERE o.customer_id IN (
-  SELECT c.id FROM customers c WHERE c.region = 'West'
-)
-GROUP BY o.customer_id
-ORDER BY revenue DESC;`,
-    rewrite: `SELECT o.customer_id,
-       COUNT(*) AS order_count,
-       SUM(o.total_amount) AS revenue
-FROM orders o
-JOIN customers c ON c.id = o.customer_id
-WHERE c.region = 'West'
-GROUP BY o.customer_id
-ORDER BY revenue DESC;`,
-    rewriteLabel: "Turn membership into an explicit join",
-  },
-] as const;
-
-export const JOIN_HOTSPOTS = [
-  { pair: "customers ↔ orders", runs: 1240, rowWork: "18.6M", recommendation: "order_customer_facts", action: "Materialize", gain: "31–48%" },
-  { pair: "orders ↔ order_items", runs: 920, rowWork: "38.6M", recommendation: "order_line_rollup", action: "Pre-aggregate", gain: "35–60%" },
-  { pair: "products ↔ product_categories", runs: 760, rowWork: "608k", recommendation: "product_dimension", action: "Denormalize", gain: "12–24%" },
-  { pair: "orders ↔ payments", runs: 540, rowWork: "9.5M", recommendation: "payment_totals", action: "Aggregate", gain: "28–44%" },
-  { pair: "orders ↔ shipments", runs: 410, rowWork: "5.3M", recommendation: "fulfillment_facts", action: "Materialize", gain: "22–37%" },
-] as const;
 
 type AlaTable = { data: DataRow[] };
 type LabDatabase = {
@@ -574,17 +400,19 @@ type LabDatabase = {
 };
 
 let database: LabDatabase | null = null;
+const runtimeTables = new Map<string, LabTable>();
+
+const sqlTypes: Record<TableColumn["type"], string> = {
+  integer: "INT",
+  decimal: "DECIMAL",
+  text: "STRING",
+  date: "DATE",
+  boolean: "BOOLEAN",
+};
 
 function getDatabase(): LabDatabase {
   if (database) return database;
   const db = new alasql.Database() as unknown as LabDatabase;
-  const sqlTypes: Record<TableColumn["type"], string> = {
-    integer: "INT",
-    decimal: "DECIMAL",
-    text: "STRING",
-    date: "DATE",
-    boolean: "BOOLEAN",
-  };
 
   for (const table of LAB_TABLES) {
     const definition = table.columns.map((column) => `${column.name} ${sqlTypes[column.type]}`).join(", ");
@@ -595,8 +423,20 @@ function getDatabase(): LabDatabase {
   return db;
 }
 
-function normalized(sql: string): string {
-  return sql.replace(/--.*$/gm, " ").replace(/\s+/g, " ").replace(/;$/, "").trim().toLowerCase();
+export function getLabTable(name: string): LabTable | undefined {
+  return LAB_TABLES.find((table) => table.name === name) ?? runtimeTables.get(name);
+}
+
+export function registerRuntimeTable(table: LabTable): void {
+  const db = getDatabase();
+  runtimeTables.set(table.name, table);
+  if (db.tables[table.name]) {
+    db.tables[table.name].data = table.data;
+    return;
+  }
+  const definition = table.columns.map((column) => `${column.name} ${sqlTypes[column.type]}`).join(", ");
+  db.exec(`CREATE TABLE ${table.name} (${definition})`);
+  db.tables[table.name].data = table.data;
 }
 
 function validateReadOnly(sql: string): void {
@@ -616,252 +456,6 @@ function validateReadOnly(sql: string): void {
   }
 }
 
-function referencedTables(sql: string): string[] {
-  const found = new Set<string>();
-  const tableNames = LAB_TABLES.map((table) => table.name);
-  const sourceRegex = /\b(?:from|join)\s+([a-z_][a-z0-9_]*)/gi;
-  let match: RegExpExecArray | null;
-  while ((match = sourceRegex.exec(sql)) !== null) {
-    if (tableNames.includes(match[1].toLowerCase())) found.add(match[1].toLowerCase());
-  }
-  return [...found];
-}
-
-function exampleRewrite(sql: string): { sql: string; label: string } | null {
-  const match = EXAMPLES.find((example) => normalized(example.sql) === normalized(sql));
-  if (match?.rewrite && match.rewriteLabel) return { sql: match.rewrite, label: match.rewriteLabel };
-
-  let rewritten = sql;
-  let changed = false;
-  rewritten = rewritten.replace(
-    /YEAR\s*\(\s*([a-z_][\w.]*?)\s*\)\s*=\s*(20\d{2})/gi,
-    (_full, column: string, yearText: string) => {
-      changed = true;
-      const year = Number(yearText);
-      return `${column} >= '${year}-01-01' AND ${column} < '${year + 1}-01-01'`;
-    },
-  );
-  return changed ? { sql: rewritten, label: "Use a bounded date range" } : null;
-}
-
-function findingList(sql: string, tables: string[]): Finding[] {
-  const findings: Finding[] = [];
-  const compact = normalized(sql);
-  const add = (finding: Finding) => findings.push(finding);
-
-  if (tables.includes("customers") && tables.includes("orders") && !tables.includes("order_customer_facts")) {
-    add({
-      id: "hot-customer-order-join",
-      title: "This join repeats 1,240 times per week",
-      detail: "The workload profile repeatedly reconstructs customer region and segment on top of each order.",
-      fix: "Serve this pattern from order_customer_facts and refresh it incrementally when orders change.",
-      impact: "high",
-      estimatedGain: "31–48% less repeated join work",
-    });
-  }
-  if ((tables.includes("payments") && tables.includes("support_tickets")) || (tables.includes("order_items") && tables.includes("shipments"))) {
-    add({
-      id: "independent-fanout",
-      title: "Independent one-to-many joins multiply rows",
-      detail: "Joining two many-sided relations at once creates combinations before the final aggregation and can inflate sums.",
-      fix: "Aggregate each many-side to its parent key first, then join the compact results.",
-      impact: "high",
-      estimatedGain: "fixes totals + shrinks intermediate rows",
-    });
-  }
-  if (tables.length >= 6) {
-    add({
-      id: "deep-join-graph",
-      title: `${tables.length} source tables make this plan brittle`,
-      detail: "Cardinality errors compound as the optimizer chooses an order across a deep join graph.",
-      fix: "Split stable dimensions from high-grain facts and reuse a tested intermediate model.",
-      impact: "medium",
-      estimatedGain: "fewer plan permutations and spills",
-    });
-  }
-
-  if (/select\s+(?:[a-z_]\w*\.)?\*/i.test(sql)) {
-    add({
-      id: "projection",
-      title: "Project only the columns you use",
-      detail: "SELECT * moves every field through the join and makes the result contract fragile.",
-      fix: "Replace * with the exact customer and order fields required by the consumer.",
-      impact: "high",
-      estimatedGain: "20–45% less data moved",
-    });
-  }
-  if (/\byear\s*\(/i.test(sql)) {
-    add({
-      id: "sargable-date",
-      title: "Make the date predicate searchable",
-      detail: "YEAR(created_at) must be evaluated row by row before the engine can filter.",
-      fix: "Use created_at >= 'YYYY-01-01' and created_at < 'YYYY+1-01-01'.",
-      impact: "high",
-      estimatedGain: "up to 66% fewer rows scanned",
-    });
-  }
-  if (/\b(lower|upper|cast|substring)\s*\([^)]*\)\s*(=|like|>|<)/i.test(sql)) {
-    add({
-      id: "wrapped-filter",
-      title: "Avoid functions on filtered columns",
-      detail: "Transforming a column inside the predicate prevents a direct lookup on its stored value.",
-      fix: "Normalize at write time or add a dedicated normalized/search column and index it.",
-      impact: "medium",
-      estimatedGain: "table scan → targeted lookup",
-    });
-  }
-  if (/like\s+'%/i.test(sql)) {
-    add({
-      id: "leading-wildcard",
-      title: "A leading wildcard forces a scan",
-      detail: "LIKE '%term%' cannot seek from the beginning of a conventional index.",
-      fix: "Use a search index, token table, or a prefix query if the product behavior allows it.",
-      impact: "high",
-      estimatedGain: "O(n) scan → indexed search",
-    });
-  }
-  if (/\bin\s*\(\s*select\b/i.test(sql)) {
-    add({
-      id: "membership-subquery",
-      title: "Express membership as a join",
-      detail: "The nested membership set hides the relationship and can be rebuilt repeatedly.",
-      fix: "Join the filtered customer set once on customer_id.",
-      impact: "medium",
-      estimatedGain: "one reusable join pass",
-    });
-  }
-  if (/\bdistinct\b/i.test(sql) && /\bjoin\b/i.test(sql)) {
-    add({
-      id: "distinct-after-join",
-      title: "Do not use DISTINCT to repair join fan-out",
-      detail: "Deduplicating after a wide join sorts or hashes a larger intermediate result.",
-      fix: "Fix the join cardinality or use EXISTS when only membership matters.",
-      impact: "medium",
-      estimatedGain: "smaller intermediate result",
-    });
-  }
-  if (/\border\s+by\b/i.test(sql) && !/\blimit\s+\d+/i.test(sql) && !/\bgroup\s+by\b/i.test(sql)) {
-    add({
-      id: "unbounded-sort",
-      title: "The final sort is unbounded",
-      detail: "Every qualifying row must be retained and sorted before the client sees the first row.",
-      fix: "Add a LIMIT for interactive exploration, or paginate with a stable sort key.",
-      impact: "medium",
-      estimatedGain: "lower memory pressure",
-    });
-  }
-  if (tables.length >= 3 && /\bgroup\s+by\b/i.test(sql)) {
-    add({
-      id: "preaggregate",
-      title: "Aggregate before the widest join",
-      detail: "Line items are joined at full grain before being reduced into the final dimensions.",
-      fix: "Pre-aggregate order_items by order_id and product_id, then join the smaller relation.",
-      impact: "high",
-      estimatedGain: "35–60% smaller join input",
-    });
-  }
-  if (!/\bwhere\b/i.test(compact) && tables.some((name) => name === "orders" || name === "order_items")) {
-    add({
-      id: "unfiltered-scan",
-      title: "Large fact tables are unfiltered",
-      detail: "The query reads the full fact-table history on every execution.",
-      fix: "Push a date, status, or partition predicate as close to the source as possible.",
-      impact: "high",
-      estimatedGain: "depends on retained history",
-    });
-  }
-  return findings.slice(0, 5);
-}
-
-export function analyzeQuery(sql: string): QueryAnalysis {
-  const tables = referencedTables(sql);
-  const findings = findingList(sql, tables);
-  const plan: PlanStep[] = [];
-  let touchedRows = 0;
-  const plainDateRange = /created_at\s*>=\s*'20\d{2}-01-01'/i.test(sql);
-  const hasWhere = /\bwhere\b/i.test(sql);
-
-  tables.forEach((name) => {
-    const table = LAB_TABLES.find((candidate) => candidate.name === name)!;
-    let scanned = table.data.length;
-    let detail = `Sequential scan of ${name}`;
-    if ((name === "orders" || name === "order_customer_facts") && plainDateRange) {
-      scanned = Math.round(scanned * 0.34);
-      detail = name === "order_customer_facts" ? "Range scan of materialized order + customer rows" : "Range scan on orders.created_at";
-    } else if (hasWhere && name !== "order_items" && !/\b(year|lower|upper)\s*\(/i.test(sql)) {
-      scanned = Math.max(1, Math.round(scanned * 0.55));
-      detail = `Filtered scan of ${name}`;
-    }
-    touchedRows += scanned;
-    const scanCost = name === "order_customer_facts" ? Math.round(scanned * 0.78) : scanned;
-    plan.push({ operation: "SCAN", detail, rows: scanned, cost: scanCost, tone: "scan" });
-  });
-
-  let streamRows = Math.max(1, Math.max(...(plan.length ? plan.map((step) => step.rows) : [1])));
-  if (hasWhere) {
-    const filterRows = Math.max(1, Math.round(streamRows * (/like\s+'%/i.test(sql) ? 0.18 : 0.42)));
-    plan.push({
-      operation: "FILTER",
-      detail: /\b(year|lower|upper)\s*\(/i.test(sql) ? "Evaluate expression for each candidate row" : "Apply pushed predicates",
-      rows: filterRows,
-      cost: Math.round(streamRows * 0.28),
-      tone: "filter",
-    });
-    streamRows = filterRows;
-  }
-
-  if (/\bin\s*\(\s*select\b/i.test(sql)) {
-    plan.push({
-      operation: "SUBQUERY",
-      detail: "Build and probe the nested membership set",
-      rows: streamRows,
-      cost: Math.round(streamRows * 1.6),
-      tone: "compute",
-    });
-  }
-
-  const joinCount = (sql.match(/\bjoin\b/gi) || []).length;
-  for (let index = 0; index < joinCount; index += 1) {
-    streamRows = Math.max(1, Math.round(streamRows * 1.35));
-    plan.push({
-      operation: "HASH JOIN",
-      detail: `Resolve relationship ${index + 1} of ${joinCount}`,
-      rows: streamRows,
-      cost: Math.round(streamRows * 0.9),
-      tone: "join",
-    });
-  }
-  if (/\bgroup\s+by\b/i.test(sql)) {
-    streamRows = Math.max(1, Math.round(Math.sqrt(streamRows) * 3));
-    plan.push({ operation: "AGGREGATE", detail: "Hash rows into requested groups", rows: streamRows, cost: streamRows * 4, tone: "compute" });
-  }
-  if (/\border\s+by\b/i.test(sql)) {
-    plan.push({ operation: "SORT", detail: /\blimit\b/i.test(sql) ? "Top-N ordered result" : "Order complete result set", rows: streamRows, cost: Math.round(streamRows * Math.log2(streamRows + 1)), tone: "compute" });
-  }
-
-  const penalty = findings.reduce((score, finding) => score + ({ high: 17, medium: 10, low: 5 }[finding.impact]), 0);
-  const rewrite = exampleRewrite(sql);
-  return {
-    health: Math.max(28, 100 - penalty),
-    findings,
-    touchedRows,
-    estimatedCost: plan.reduce((total, step) => total + step.cost, 0),
-    referencedTables: tables,
-    plan,
-    rewriteSQL: rewrite?.sql ?? null,
-    rewriteLabel: rewrite?.label ?? null,
-  };
-}
-
-function stableRows(rows: DataRow[]): string {
-  const canonical = rows.map((row) => JSON.stringify(Object.fromEntries(
-    Object.entries(row)
-      .sort(([left], [right]) => left.localeCompare(right))
-      .map(([key, value]) => [key, typeof value === "number" ? Math.round(value * 1_000_000) / 1_000_000 : value]),
-  )));
-  return JSON.stringify(canonical.sort());
-}
-
 function execute(sql: string): { rows: DataRow[]; elapsedMs: number } {
   validateReadOnly(sql);
   const db = getDatabase();
@@ -872,25 +466,8 @@ function execute(sql: string): { rows: DataRow[]; elapsedMs: number } {
   return { rows: result as DataRow[], elapsedMs };
 }
 
-export function runLabQuery(sql: string): QueryRun {
-  const analysis = analyzeQuery(sql);
-  const baseline = execute(sql);
-  let rewritten: QueryRun["rewritten"] = null;
-  if (analysis.rewriteSQL) {
-    try {
-      const candidate = execute(analysis.rewriteSQL);
-      rewritten = {
-        sql: analysis.rewriteSQL,
-        rows: candidate.rows,
-        elapsedMs: candidate.elapsedMs,
-        analysis: analyzeQuery(analysis.rewriteSQL),
-        sameResult: stableRows(baseline.rows) === stableRows(candidate.rows),
-      };
-    } catch {
-      rewritten = null;
-    }
-  }
-  return { ...baseline, analysis, rewritten };
+export function executeLabSQL(sql: string): { rows: DataRow[]; elapsedMs: number } {
+  return execute(sql);
 }
 
 export function formatNumber(value: number): string {
