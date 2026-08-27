@@ -35,11 +35,16 @@ test("ships a generalized workload optimizer and removes starter preview code", 
 
   assert.match(page, /Join overlap/);
   assert.match(page, /Modeled runs \/ week/);
-  assert.match(page, /Parallel plan/);
+  assert.match(page, /Cluster simulation/);
+  assert.match(page, /MULTI-NODE SCALING LAB/);
+  assert.match(page, /Compute nodes \/ VMs/);
+  assert.match(page, /simulateCompute/);
   assert.match(page, /deriveJoinHotspots/);
   assert.match(optimizer, /parseQueryModel/);
   assert.match(optimizer, /recordWorkload/);
   assert.match(optimizer, /parallelGroup/);
+  assert.match(optimizer, /DEFAULT_COMPUTE_CONFIG/);
+  assert.match(optimizer, /spillMs/);
   assert.match(optimizer, /CREATE MATERIALIZED VIEW/);
   assert.doesNotMatch(optimizer, /EXAMPLES\.find|normalized\(example\.sql\)/);
   assert.doesNotMatch(lab, /order_customer_facts|JOIN_HOTSPOTS/);

@@ -531,6 +531,152 @@ function summarizeParallelism(plan: PlanStep[]): ParallelismSummary {
   };
 }
 
+export type ComputeConfig = {
+  nodes: number;
+  workersPerNode: number;
+  memoryGbPerNode: number;
+  scanGbpsPerNode: number;
+  networkGbpsPerNode: number;
+  skewPercent: number;
+  dataScale: number;
+};
+
+export type ScalingScenario = {
+  nodes: number;
+  totalWorkers: number;
+  estimatedMs: number;
+  speedup: number;
+  efficiency: number;
+  scanMs: number;
+  computeMs: number;
+  exchangeMs: number;
+  spillMs: number;
+  spillGb: number;
+  computeSeconds: number;
+  bottleneck: "scan" | "compute" | "exchange" | "spill" | "serial";
+};
+
+export type ComputeSimulation = {
+  config: ComputeConfig;
+  scenarios: ScalingScenario[];
+  selected: ScalingScenario;
+  baseline: ScalingScenario;
+  scanGb: number;
+  exchangeGb: number;
+  workingSetGb: number;
+};
+
+export const DEFAULT_COMPUTE_CONFIG: ComputeConfig = {
+  nodes: 5,
+  workersPerNode: 4,
+  memoryGbPerNode: 4,
+  scanGbpsPerNode: 1.2,
+  networkGbpsPerNode: 1,
+  skewPercent: 10,
+  dataScale: 2_000,
+};
+
+function columnBytes(column: TableColumn): number {
+  return { integer: 8, decimal: 8, text: 28, date: 8, boolean: 1 }[column.type];
+}
+
+function averageRowBytes(model: QueryModel): number {
+  const widths = model.tables
+    .map((table) => getLabTable(table.name))
+    .filter((table): table is LabTable => Boolean(table))
+    .map((table) => table.columns.reduce((total, column) => total + columnBytes(column), 12));
+  return widths.length ? Math.max(24, widths.reduce((total, width) => total + width, 0) / widths.length) : 64;
+}
+
+function dominantStage(parts: { scan: number; compute: number; exchange: number; spill: number }, serialFraction: number): ScalingScenario["bottleneck"] {
+  if (parts.spill >= Math.max(parts.scan, parts.compute, parts.exchange)) return "spill";
+  if (serialFraction >= 0.28 && parts.compute >= Math.max(parts.scan, parts.exchange) * 0.7) return "serial";
+  const ranked: Array<["scan" | "compute" | "exchange", number]> = [
+    ["scan", parts.scan],
+    ["compute", parts.compute],
+    ["exchange", parts.exchange],
+  ];
+  return ranked.sort((left, right) => right[1] - left[1])[0][0];
+}
+
+export function simulateCompute(plan: PlanStep[], model: QueryModel, input: ComputeConfig): ComputeSimulation {
+  const config: ComputeConfig = {
+    nodes: Math.max(1, Math.min(16, Math.round(input.nodes))),
+    workersPerNode: Math.max(1, Math.min(16, Math.round(input.workersPerNode))),
+    memoryGbPerNode: Math.max(1, Math.min(128, input.memoryGbPerNode)),
+    scanGbpsPerNode: Math.max(0.1, Math.min(20, input.scanGbpsPerNode)),
+    networkGbpsPerNode: Math.max(0.1, Math.min(20, input.networkGbpsPerNode)),
+    skewPercent: Math.max(0, Math.min(90, input.skewPercent)),
+    dataScale: Math.max(1, Math.min(100_000, Math.round(input.dataScale))),
+  };
+  const rowBytes = averageRowBytes(model);
+  const scans = plan.filter((step) => step.operation.includes("SCAN"));
+  const joins = plan.filter((step) => step.tone === "join" || step.operation === "EXCHANGE");
+  const scanGb = scans.reduce((total, step) => total + step.rows * rowBytes * config.dataScale, 0) / 1_000_000_000;
+  const exchangeGb = joins.reduce((total, step) => total + step.rows * rowBytes * config.dataScale, 0) / 1_000_000_000;
+  const workingSetGb = Math.max(0.01, ...plan.map((step) => step.rows * rowBytes * config.dataScale * 1.8 / 1_000_000_000));
+  const waves = Math.max(1, ...plan.map((step) => step.parallelGroup ?? 1));
+  const totalWork = Math.max(1, plan.reduce((total, step) => total + step.cost, 0));
+  const serialWork = plan.filter((step) => (step.workers ?? 1) === 1).reduce((total, step) => total + step.cost, 0);
+  const serialFraction = serialWork / totalWork;
+  const scenarioNodes = [...new Set([1, 2, 5, config.nodes])].sort((left, right) => left - right);
+
+  const raw = scenarioNodes.map((nodes) => {
+    const totalWorkers = nodes * config.workersPerNode;
+    let computeMs = 0;
+    for (let wave = 1; wave <= waves; wave += 1) {
+      const durations = plan
+        .filter((step) => (step.parallelGroup ?? 1) === wave)
+        .map((step) => {
+          const serial = (step.workers ?? 1) === 1;
+          const rowParallelism = Math.max(1, Math.ceil(step.rows * config.dataScale / 500_000));
+          let effectiveWorkers = serial ? 1 : Math.min(totalWorkers, rowParallelism);
+          if (step.tone === "join" || step.operation === "EXCHANGE") effectiveWorkers *= 1 - (config.skewPercent / 100) * 0.72;
+          return step.cost * config.dataScale / (Math.max(1, effectiveWorkers) * 25_000);
+        });
+      computeMs += Math.max(0, ...durations);
+    }
+    const scanMs = scanGb / (config.scanGbpsPerNode * nodes) * 1_000;
+    const exchangeMs = nodes === 1 || exchangeGb === 0 ? 0 : exchangeGb / (config.networkGbpsPerNode * Math.pow(nodes, 0.72)) * 1_000 * (1 + config.skewPercent / 80 + (nodes - 1) * 0.018);
+    const usableMemoryGb = config.memoryGbPerNode * nodes * 0.72;
+    const spillGb = Math.max(0, workingSetGb - usableMemoryGb);
+    const spillMs = spillGb === 0 ? 0 : spillGb / (config.scanGbpsPerNode * nodes * 0.32) * 2_000;
+    const coordinationMs = (nodes - 1) * (12 + waves * 5);
+    const estimatedMs = 25 + scanMs + computeMs + exchangeMs + spillMs + coordinationMs;
+    const parts = { scan: scanMs, compute: computeMs, exchange: exchangeMs, spill: spillMs };
+    return {
+      nodes,
+      totalWorkers,
+      estimatedMs,
+      speedup: 1,
+      efficiency: 100,
+      scanMs,
+      computeMs,
+      exchangeMs,
+      spillMs,
+      spillGb,
+      computeSeconds: nodes * estimatedMs / 1_000,
+      bottleneck: dominantStage(parts, serialFraction),
+    } satisfies ScalingScenario;
+  });
+
+  const oneNodeMs = raw[0].estimatedMs;
+  const scenarios = raw.map((scenario) => ({
+    ...scenario,
+    speedup: oneNodeMs / scenario.estimatedMs,
+    efficiency: (oneNodeMs / scenario.estimatedMs) / scenario.nodes * 100,
+  }));
+  return {
+    config,
+    scenarios,
+    baseline: scenarios.find((scenario) => scenario.nodes === 1)!,
+    selected: scenarios.find((scenario) => scenario.nodes === config.nodes)!,
+    scanGb,
+    exchangeGb,
+    workingSetGb,
+  };
+}
+
 function genericFindings(sql: string, model: QueryModel, workload: WorkloadState): Finding[] {
   const findings: Finding[] = [];
   const add = (finding: Finding) => {

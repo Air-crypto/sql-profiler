@@ -1,100 +1,73 @@
-# vinext-starter
+# Loopbase SQL Profiler
 
-A clean full-stack starter running on
-[vinext](https://github.com/cloudflare/vinext), with optional Cloudflare D1 and
-Drizzle support.
+A credential-free SQL workbench for learning where query time and compute spend go. It executes arbitrary read-only SQL against deterministic in-browser tables, derives optimizations from the SQL and data, and simulates how the same plan scales across a Snowflake-like multi-node compute cluster.
 
-## Prerequisites
+Live demo: [loopbase-sql-lab.aircrypto.chatgpt.site](https://loopbase-sql-lab.aircrypto.chatgpt.site)
 
-- Node.js `>=22.13.0`
+No Snowflake account, ChatGPT login, API key, database, or cloud credentials are required to clone and run the project locally.
 
-## Quick Start
+## What it does
+
+- Executes SQL against 12 realistic retail and supply-chain tables with 96,734 sample rows.
+- Parses submitted SQL into tables, aliases, join edges, cardinalities, and plan stages.
+- Detects fan-out, many-to-many joins, wrapped predicates, unbounded sorts, full projections, and other structural issues.
+- Learns repeated joins from the queries run in the browser instead of using a predefined hotspot list.
+- Generates materialized-view candidates from observed join signatures.
+- Executes safe rewrites and checks equality across the complete result set.
+- Models scan, filter, exchange, join, aggregation, and serial merge stages.
+- Compares 1, 2, and 5-node plans, plus any selected cluster size from 1–16 nodes.
+- Exposes workers per node, memory, scan bandwidth, network bandwidth, data scale, and join-key skew.
+- Reports estimated latency, speedup, scaling efficiency, compute-seconds, exchange time, spill I/O, and the current bottleneck.
+
+The sample-query menu only fills the editor. Findings, rewrites, materializations, workload hotspots, and compute results are generated from the submitted query and current settings.
+
+## Run locally
+
+Requirements: Node.js 22.13 or newer.
 
 ```bash
+git clone https://github.com/Air-crypto/sql-profiler.git
+cd sql-profiler
 npm install
 npm run dev
-npm run build
 ```
 
-This starter does not use `wrangler.jsonc`.
+Open [http://localhost:3000](http://localhost:3000).
 
-## Included Shape
+## Validate the project
 
-- edit site code under `app/`
-- `.openai/hosting.json` declares optional Sites D1 and R2 bindings
-- `vite.config.ts` simulates declared bindings for local development
-- `db/schema.ts` starts intentionally empty
-- `examples/d1/` contains an optional D1 example surface
-- `drizzle.config.ts` supports local migration generation when needed
-
-## Workspace Auth Headers
-
-Signed-in visitors receive both `oai-authenticated-user-id` and `oai-authenticated-user-email`. Private Sites require every visitor to sign in; public Sites may also have anonymous visitors, for whom neither header is present.
-
-The user ID is stable for the same user on the same Site and different across Sites. Email and name are intended for display or contact purposes.
-
-SIWC-authenticated workspace sites may also receive
-`oai-authenticated-user-full-name` when the user's SIWC profile has a non-empty
-`name` claim. The full-name value is percent-encoded UTF-8 and is accompanied by
-`oai-authenticated-user-full-name-encoding: percent-encoded-utf-8`.
-
-Treat the full name as optional and fall back to email when it is absent:
-
-```tsx
-import { headers } from "next/headers";
-
-export default async function Home() {
-  const requestHeaders = await headers();
-  const userId = requestHeaders.get("oai-authenticated-user-id");
-  const email = requestHeaders.get("oai-authenticated-user-email");
-  const encodedFullName = requestHeaders.get("oai-authenticated-user-full-name");
-  const fullName =
-    encodedFullName &&
-    requestHeaders.get("oai-authenticated-user-full-name-encoding") ===
-      "percent-encoded-utf-8"
-      ? decodeURIComponent(encodedFullName)
-      : null;
-
-  const displayName = fullName ?? email;
-  // ...
-}
+```bash
+npm test
+npm run lint
 ```
 
-## Optional Dispatch-Owned ChatGPT Sign-In
+The test suite builds the production worker, verifies the rendered application, exercises SQL outside the sample menu, compares 1/2/5-node scaling, and checks that skew and memory pressure change the result.
 
-Import the ready-to-use helpers from `app/chatgpt-auth.ts` when the site needs
-optional or required ChatGPT sign-in:
+## Multi-node model
 
-- Use `getChatGPTUser()` for optional signed-in UI.
-- Use `requireChatGPTUser(returnTo)` for server-rendered pages that should send
-  anonymous visitors through Sign in with ChatGPT.
-- Use `chatGPTSignInPath(returnTo)` and `chatGPTSignOutPath(returnTo)` for
-  browser links or actions.
-- Pass a same-origin relative `returnTo` path for the destination after sign-in
-  or sign-out. The helper validates and safely encodes it.
-- Mark protected pages with `export const dynamic = "force-dynamic"` because
-  they depend on per-request identity headers.
+This project does not call Snowflake. It is a transparent MPP-style simulation built from:
 
-Dispatch owns `/signin-with-chatgpt`, `/signout-with-chatgpt`, `/callback`, the
-OAuth cookies, and identity header injection. Do not implement app routes for
-those reserved paths. Routes that do not import and call the helper remain
-anonymous-compatible.
+- plan work and row estimates derived from the SQL;
+- data-type-based row-width estimates;
+- per-node scan and network throughput;
+- available workers and memory;
+- join-key skew;
+- repartition/exchange volume;
+- memory spill and coordination overhead; and
+- serial stages such as a global ordered merge.
 
-SIWC establishes identity only; it does not prove workspace membership. Use the
-Sites hosting platform's access policy controls for workspace-wide restrictions,
-or enforce explicit server-side membership or allowlist checks.
+The data-scale control projects the deterministic sample tables to a larger production-sized workload while preserving their observed shape. Results are comparative estimates, not a claim about a specific Snowflake warehouse size or bill.
 
-Use SIWC for account pages, user-specific dashboards, saved records, and write
-actions tied to the current ChatGPT user. Leave public content anonymous.
+## Architecture
 
-## Useful Commands
+- `app/lab.ts` creates and executes against the deterministic AlaSQL dataset.
+- `app/generalized-optimizer.ts` parses queries, builds plans, learns workload overlap, generates rewrites, and runs the multi-node simulation.
+- `app/page.tsx` contains the interactive workbench.
+- `worker/index.ts` is the Cloudflare-compatible production entry point.
+- `tests/` covers rendering, generalization, equality, and scaling behavior.
 
-- `npm run dev`: start local development
-- `npm run build`: verify the vinext build output
-- `npm test`: build the starter and verify its rendered loading skeleton
-- `npm run db:generate`: generate Drizzle migrations after schema changes
+Workload history is stored only in the visitor's browser using `localStorage`. The application has no server-side user store and sends no SQL or credentials to Snowflake, OpenAI, or another database service.
 
-## Learn More
+## Deployment note
 
-- [vinext Documentation](https://github.com/cloudflare/vinext)
-- [Drizzle D1 Guide](https://orm.drizzle.team/docs/get-started/d1-new)
+`.openai/hosting.json` contains the non-secret project identifier for the public demo. It is not needed for local development. Anyone deploying a separate copy should create their own hosting project and replace that identifier; no deployment token is committed to this repository.
