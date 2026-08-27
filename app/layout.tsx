@@ -3,7 +3,7 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "Loopbase — SQL Optimization Lab",
-  description: "Run SQL against a realistic sample dataset and test evidence-backed optimizations.",
+  description: "Run complex SQL across realistic tables, inspect repeated joins, and test query rewrites or materialized structures side by side.",
   icons: { icon: "/favicon.svg", shortcut: "/favicon.svg" },
 };
 

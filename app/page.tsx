@@ -6,13 +6,14 @@ import {
   EXAMPLES,
   formatCell,
   formatNumber,
+  JOIN_HOTSPOTS,
   LAB_TABLES,
   runLabQuery,
   type DataRow,
   type QueryRun,
 } from "./lab";
 
-type OutputTab = "results" | "plan" | "data";
+type OutputTab = "results" | "plan" | "data" | "workload";
 
 function ResultTable({ rows, emptyMessage = "The query returned no rows." }: { rows: DataRow[]; emptyMessage?: string }) {
   if (!rows.length) return <div className="empty-state">{emptyMessage}</div>;
@@ -48,6 +49,7 @@ export default function Home() {
   const liveAnalysis = useMemo(() => analyzeQuery(query), [query]);
   const analysis = run?.analysis ?? liveAnalysis;
   const table = LAB_TABLES.find((candidate) => candidate.name === selectedTable) ?? LAB_TABLES[0];
+  const totalRows = LAB_TABLES.reduce((total, candidate) => total + candidate.data.length, 0);
   const lineNumbers = Array.from({ length: Math.max(8, query.split("\n").length) }, (_, index) => index + 1);
 
   function execute(nextQuery: string = query) {
@@ -99,7 +101,7 @@ export default function Home() {
         <div className="rail-copy">
           <p className="eyebrow">WORKSPACE</p>
           <h1>Retail<br />sandbox</h1>
-          <p className="dataset-note">17,300 deterministic records. Generated locally, reset on refresh.</p>
+          <p className="dataset-note">{LAB_TABLES.length} tables · {formatNumber(totalRows)} deterministic rows. Generated locally.</p>
         </div>
         <div className="table-list">
           {LAB_TABLES.map((item) => (
@@ -119,7 +121,9 @@ export default function Home() {
           <span>RELATIONSHIPS</span>
           <p>customers.id → orders.customer_id</p>
           <p>orders.id → order_items.order_id</p>
-          <p>products.id → order_items.product_id</p>
+          <p>orders.id → payments + shipments</p>
+          <p>products.id → inventory + suppliers</p>
+          <p className="materialized-relation">↳ order_customer_facts (materialized)</p>
         </div>
         <div className="rail-footer"><span className="status-dot" /> Engine ready</div>
       </aside>
@@ -200,12 +204,13 @@ export default function Home() {
             <button className={tab === "results" ? "active" : ""} type="button" onClick={() => setTab("results")}>Results {run && <span>{formatNumber(run.rows.length)}</span>}</button>
             <button className={tab === "plan" ? "active" : ""} type="button" onClick={() => setTab("plan")}>Execution plan <span>{analysis.plan.length}</span></button>
             <button className={tab === "data" ? "active" : ""} type="button" onClick={() => setTab("data")}>Sample data</button>
+            <button className={tab === "workload" ? "active" : ""} type="button" onClick={() => setTab("workload")}>Join overlap <span>{JOIN_HOTSPOTS.length}</span></button>
             <div className="output-meta">{analysis.referencedTables.length ? analysis.referencedTables.join(" + ") : "No table detected"}</div>
           </div>
 
           {error && <div className="query-error"><strong>Query stopped</strong><span>{error}</span></div>}
           {!error && tab === "results" && (
-            running ? <div className="empty-state pulse">Executing against 17,300 local records…</div> : <ResultTable rows={run?.rows ?? []} />
+            running ? <div className="empty-state pulse">Executing against {formatNumber(totalRows)} local rows…</div> : <ResultTable rows={run?.rows ?? []} />
           )}
           {!error && tab === "plan" && (
             <div className="plan-list">
@@ -230,6 +235,36 @@ export default function Home() {
                 </div>
               </div>
               <ResultTable rows={table.data.slice(0, 12)} />
+            </div>
+          )}
+          {!error && tab === "workload" && (
+            <div className="workload-view">
+              <div className="workload-summary">
+                <div><p className="eyebrow">SIMULATED QUERY LOG</p><h3>Repeated joins across the workload</h3><span>Frequency is modeled over one week of dashboard, API, and analyst traffic.</span></div>
+                <div className="workload-stat"><strong>3,870</strong><span>modeled executions</span></div>
+                <div className="workload-stat accent"><strong>72.6M</strong><span>join-row work</span></div>
+              </div>
+              <div className="hotspot-table-wrap">
+                <table className="hotspot-table">
+                  <thead><tr><th>Repeated relationship</th><th>Runs / week</th><th>Row work</th><th>Reusable structure</th><th>Action</th><th>Modeled gain</th></tr></thead>
+                  <tbody>
+                    {JOIN_HOTSPOTS.map((hotspot, index) => (
+                      <tr key={hotspot.pair} className={index === 0 ? "recommended" : ""}>
+                        <td><span className="hotspot-rank">{index + 1}</span><strong>{hotspot.pair}</strong></td>
+                        <td>{formatNumber(hotspot.runs)}</td>
+                        <td>{hotspot.rowWork}</td>
+                        <td><code>{hotspot.recommendation}</code>{index === 0 && <small>LIVE IN LAB</small>}</td>
+                        <td>{hotspot.action}</td>
+                        <td><strong>{hotspot.gain}</strong></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <div className="materialization-explainer">
+                <span>WHY #1 IS MATERIALIZED</span>
+                <p><code>customers</code> changes slowly, while <code>orders</code> is queried constantly by region and segment. The lab stores those stable customer fields directly on <code>order_customer_facts</code>, removing one hot join from every downstream query.</p>
+              </div>
             </div>
           )}
         </section>
@@ -298,7 +333,7 @@ export default function Home() {
 
         <footer className="lab-footer">
           <span>LOOPBASE / LOCAL QUERY LAB</span>
-          <p>Actual rows + browser runtime · transparent modeled plans · no Snowflake connection</p>
+          <p>{LAB_TABLES.length} tables · actual rows + browser runtime · transparent modeled plans</p>
         </footer>
       </section>
     </main>
